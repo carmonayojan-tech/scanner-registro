@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Escáner QR Blogger</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body{font-family:Arial,sans-serif;background:#0f172a;color:#fff;margin:0;padding:16px}
+    .wrap{max-width:720px;margin:0 auto}.card{background:#111827;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.3);margin-bottom:16px}
+    h1{font-size:24px;margin:0 0 8px}p{color:#cbd5e1}label{display:block;margin-top:10px;margin-bottom:6px;font-weight:bold}
+    select,button{width:100%;padding:12px;border-radius:10px;border:none;font-size:15px;margin-top:10px}button{background:#22c55e;color:#052e16;font-weight:700;cursor:pointer}
+    #reader{width:100%;max-width:420px;margin:18px auto;border-radius:12px;overflow:hidden;background:#000;min-height:120px}.status{margin-top:12px;padding:12px;border-radius:10px;background:#1e293b;color:#e2e8f0}
+    .danger{background:#7f1d1d}.ok{background:#14532d}.warn{background:#78350f}.row{display:grid;grid-template-columns:1fr;gap:12px}
+    @media(min-width:640px){.row{grid-template-columns:1fr 1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap"><div class="card"><h1>Escáner QR</h1><p>Todo el registro ocurre sin salir de esta página. Se muestra el resultado aquí mismo y el escáner vuelve a activarse.</p>
+    <div class="row">
+      <div><label>Estado</label><select id="estado"><option value="INGRESO">INGRESO</option><option value="SALIDA">SALIDA</option></select></div>
+      <div><label>Cámara</label><select id="cameraSelect"><option value="">Pulsa "Activar cámara"</option></select></div>
+    </div>
+    <button id="btnStart" type="button">Activar cámara</button>
+    <div id="reader"></div>
+    <div id="status" class="status">Pulsa "Activar cámara" para iniciar.</div>
+  </div></div>
+
+  <script>
+    const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxXI0YAday7Z2rdnr9dsWGSjsZ-7DK-9oeQFmURZvTlRhPyUk9VGdCKhGlHWj3bUEWn/exec';
+    let html5QrCode = null;
+    let currentCameraId = '';
+    let lastScan = { text: '', time: 0 };
+    let isRegistering = false;
+
+    function setStatus(msg, type) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = 'status ' + (type || '');
+    }
+
+    function isDuplicate(text) {
+      const now = Date.now();
+      if (lastScan.text === text && (now - lastScan.time) < 4000) return true;
+      lastScan = { text, time: now };
+      return false;
+    }
+
+    async function stopScanner() {
+      if (!html5QrCode) return;
+      try { await html5QrCode.stop(); } catch(e) {}
+      try { await html5QrCode.clear(); } catch(e) {}
+      html5QrCode = null;
+    }
+
+    async function ensureCamerasLoaded() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      stream.getTracks().forEach(track => track.stop());
+      const devices = await Html5Qrcode.getCameras();
+      const select = document.getElementById('cameraSelect');
+      select.innerHTML = '';
+      if (!devices || !devices.length) throw new Error('No se detectaron cámaras.');
+      devices.forEach((cam, index) => {
+        const option = document.createElement('option');
+        option.value = cam.id;
+        const label = (cam.label || '').toLowerCase();
+        option.textContent = /(back|rear|trasera)/i.test(label) ? 'Cámara trasera' : ('Cámara ' + (index + 1));
+        select.appendChild(option);
+      });
+      const rear = devices.find(d => /(back|rear|trasera)/i.test((d.label || '').toLowerCase()));
+      currentCameraId = rear ? rear.id : devices[0].id;
+      select.value = currentCameraId;
+      select.onchange = function(){ currentCameraId = this.value; };
+    }
+
+    async function startScanner() {
+      try {
+        setStatus('Solicitando permiso de cámara...', 'warn');
+        await stopScanner();
+        await ensureCamerasLoaded();
+        html5QrCode = new Html5Qrcode('reader');
+        await html5QrCode.start(
+          { deviceId: { exact: currentCameraId } },
+          { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1 },
+          onScanSuccess,
+          function(){}
+        );
+        setStatus('Escaneando... acerca el QR al recuadro.', 'ok');
+      } catch (error) {
+        setStatus('No se pudo activar la cámara: ' + (error.message || error), 'danger');
+      }
+    }
+
+    function registrarPorJsonp(id, estado) {
+      return new Promise((resolve, reject) => {
+        const callbackName = 'qrCallback_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+        const script = document.createElement('script');
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error('Tiempo de espera agotado al registrar.'));
+        }, 12000);
+
+        function cleanup() {
+          clearTimeout(timeout);
+          if (script.parentNode) script.parentNode.removeChild(script);
+          delete window[callbackName];
+        }
+
+        window[callbackName] = function(response) {
+          cleanup();
+          resolve(response);
+        };
+
+        script.onerror = function() {
+          cleanup();
+          reject(new Error('No se pudo contactar con Apps Script.'));
+        };
+
+        script.src = APPS_SCRIPT_URL +
+          '?page=registrar_jsonp' +
+          '&id=' + encodeURIComponent(id) +
+          '&estado=' + encodeURIComponent(estado) +
+          '&callback=' + encodeURIComponent(callbackName);
+
+        document.body.appendChild(script);
+      });
+    }
+
+    async function onScanSuccess(decodedText) {
+      if (isRegistering || isDuplicate(decodedText)) return;
+      isRegistering = true;
+      const id = decodedText.trim();
+      const estado = document.getElementById('estado').value;
+      setStatus('QR detectado. Registrando asistencia...', 'warn');
+      await stopScanner();
+
+      try {
+        const response = await registrarPorJsonp(id, estado);
+        if (response && response.exito) {
+          setStatus(`${response.estado} registrado: ${response.nombre} ${response.hora ? '- ' + response.hora : ''}`, 'ok');
+        } else {
+          setStatus((response && response.mensaje) || 'No se pudo registrar.', 'danger');
+        }
+      } catch (error) {
+        setStatus(error.message || 'Error al registrar.', 'danger');
+      }
+
+      isRegistering = false;
+      setTimeout(() => { startScanner(); }, 1800);
+    }
+
+    document.getElementById('btnStart').addEventListener('click', startScanner);
+    window.addEventListener('beforeunload', function(){ stopScanner(); });
+  </script>
+</body>
+</html>
